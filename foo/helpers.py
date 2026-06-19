@@ -38,7 +38,7 @@ if not logger.handlers:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Redis (Upstash REST). The URL may come from either name.
+    # Redis Upstash REST
     upstash_redis_rest_url: str | None = None
     upstash_redis_rest_token: str | None = None
     redis_url: str | None = None
@@ -157,10 +157,13 @@ async def check_rate_limit(user_id: str) -> None:
     INCR is atomic and the key auto-expires when the window passes. Raises
     RateLimitExceeded once a user goes over the configured budget for the window.
     """
+    
+    # Gives number of seconds, divided by window size, floored to an int.
+    # 0 to 59 seconds in a minute all map to the same window value, then 60-119 to the next, etc.
     window = int(time.time()) // settings.chat_rate_limit_window
     key = f"ratelimit:{user_id}:{window}"
-    
     count = await redis_client.incr(key)
+
     if count > settings.chat_rate_limit_max:
         raise RateLimitExceeded(retry_after=settings.chat_rate_limit_window)
     

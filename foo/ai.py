@@ -65,22 +65,13 @@ async def get_response(messages: list[dict], system_message: str | None = None, 
     until the history grows past that, which is expected.
     """
     model = model or settings.chat_model
-    # Mark the last message so everything before it (system + prior turns) is the
-    # cacheable prefix. Build a copy — we must NOT persist cache_control into the
-    # stored history, and we must not mutate the caller's list.
+    # Shallow-copy so we don't mutate the caller's list, then rewrap just the last
+    # message with cache_control. cache_control is request-time only — we must not
+    # persist it back to the stored history.
     cached_messages = list(messages)
     if cached_messages:
         last = cached_messages[-1]
-        cached_messages[-1] = {
-            "role": last["role"],
-            "content": [
-                {
-                    "type": "text",
-                    "text": last["content"],
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        }
+        cached_messages[-1] = _message(last["role"], last["content"], cache=True)
 
     params = {
         "model": model,
@@ -116,15 +107,31 @@ async def get_response(messages: list[dict], system_message: str | None = None, 
 # ---------------------------------------------------------------------------
 # CLI (interactive terminal) — keeps history in memory, not Redis
 # ---------------------------------------------------------------------------
-def add_user_message(content: str, messages: list[dict]) -> list[dict]:
-    """Append a user message to an in-memory list and return it (CLI helper)."""
-    messages.append({"role": "user", "content": content})
+def _message(role: str, content: str, cache: bool = False) -> dict:
+    """
+    Build a single message dict. With cache=True, the content is wrapped as a
+    cache_control:ephemeral text block — marking the breakpoint of the cacheable
+    prefix for prompt caching.
+    """
+    if cache:
+        return {
+            "role": role,
+            "content": [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+            ],
+        }
+    return {"role": role, "content": content}
+
+
+def add_user_message(content: str, messages: list[dict], cache: bool = False) -> list[dict]:
+    """Append a user message (optionally cache-marked) and return the list."""
+    messages.append(_message("user", content, cache))
     return messages
 
 
-def add_assistant_message(content: str, messages: list[dict]) -> list[dict]:
-    """Append an assistant message to an in-memory list and return it (CLI helper)."""
-    messages.append({"role": "assistant", "content": content})
+def add_assistant_message(content: str, messages: list[dict], cache: bool = False) -> list[dict]:
+    """Append an assistant message (optionally cache-marked) and return the list."""
+    messages.append(_message("assistant", content, cache))
     return messages
 
 

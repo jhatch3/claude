@@ -19,7 +19,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from helpers import (
     load_history,
@@ -33,6 +32,7 @@ from helpers import (
     RateLimitExceeded,
 )
 from ai import prompt, get_response, agent_healthcheck
+from schemas import ChatRequest, ChatResponse, HealthResponse, ResetResponse
 
 
 logger = logging.getLogger("chatbot")
@@ -51,27 +51,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Chatbot API", version="1.0.0", lifespan=lifespan)
-
-
-# --- Schemas ---
-class ChatRequest(BaseModel):
-    user_id: str
-    message: str
-
-
-class ChatResponse(BaseModel):
-    response: str
-
-
-class HealthResponse(BaseModel):
-    status: str = "ok"
-    redis: bool
-    agent: bool
-
-
-class ResetResponse(BaseModel):
-    status: str = "ok"
-    message: str
 
 
 # --- Domain-error -> HTTP mapping ---
