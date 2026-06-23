@@ -30,6 +30,9 @@ dist/
 .vscode/
 .idea/
 
+# Local SQLite dev database
+*.db
+
 # OS cruft
 .DS_Store
 Thumbs.db

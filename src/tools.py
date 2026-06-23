@@ -4,6 +4,13 @@ Tool registry and implementations for the AI module.
 Register a tool with the @tool decorator; ai.py pulls the definitions via
 get_tool_definitions() and dispatches calls via run_tool().
 """
+from decimal import Decimal
+
+from src.db import db
+from src.embeddings import get_embedder
+
+# Embedder used to vectorize search queries (matches what ingestion used).
+_embedder = get_embedder()
 
 # Maps tool name -> {"definition": <API schema>, "fn": <callable>}
 tool_dic = {}
@@ -96,59 +103,11 @@ def get_weather(city):
 
 # Scenario-1: Customer Support
 # ==================================
-# In-memory mock data — stand-ins for real back-end systems.
-_CUSTOMERS = [
-    {
-        "customer_id": "cust_001",
-        "name": "Ada Lovelace",
-        "status": "active",
-        "email": "ada@example.com",
-        "phone": "+1-555-0001",
-    },
-    {
-        "customer_id": "cust_002",
-        "name": "Alan Turing",
-        "status": "active",
-        "email": "alan@example.com",
-        "phone": "+1-555-0002",
-    },
-]
-
-_ORDERS = [
-    {
-        "order_id": "ord_1001",
-        "customer_id": "cust_001",
-        "items": ["Mechanical keyboard", "USB-C cable"],
-        "status": "delivered",
-        "total": 149.99,
-        "order_date": "2026-05-01",
-        "delivery_date": "2026-05-04",
-    },
-    {
-        "order_id": "ord_1002",
-        "customer_id": "cust_001",
-        "items": ["4K monitor"],
-        "status": "shipped",
-        "total": 612.00,
-        "order_date": "2026-06-10",
-        "delivery_date": None,
-    },
-]
+# Records live in the relational store (src/db.py). Run `python -m src.db`
+# once to create and seed the tables. Queries go through the `db` object.
 
 # Refunds at or below this amount are auto-approved; above it must escalate.
-REFUND_THRESHOLD = 500.0
-
-
-def _find_order(customer_id, order_id):
-    """Return the order if it exists and belongs to the customer, else None."""
-    return next(
-        (
-            o
-            for o in _ORDERS
-            if o["order_id"] == order_id and o["customer_id"] == customer_id
-        ),
-        None,
-    )
+REFUND_THRESHOLD = Decimal("500.00")
 
 
 @tool(
@@ -186,21 +145,13 @@ def get_customer(email=None, phone=None, customer_id=None):
     if not any([email, phone, customer_id]):
         return {"error": "Provide at least one of: email, phone, customer_id."}
 
-    matches = [
-        c
-        for c in _CUSTOMERS
-        if (customer_id and c["customer_id"] == customer_id)
-        or (email and c["email"].lower() == email.lower())
-        or (phone and c["phone"] == phone)
-    ]
+    matches = db.find_customers(email=email, phone=phone, customer_id=customer_id)
 
-    record_fields = ("customer_id", "name", "status")
     if len(matches) == 1:
-        c = matches[0]
-        return {"customer": {k: c[k] for k in record_fields}}
+        return {"customer": matches[0].to_record()}
     if len(matches) > 1:
         return {
-            "matches": [{k: c[k] for k in record_fields} for c in matches],
+            "matches": [c.to_record() for c in matches],
             "message": "Multiple customers matched; ask for another identifier.",
         }
     return {"customer": None, "message": "No matching customer found."}
@@ -231,10 +182,8 @@ def get_customer(email=None, phone=None, customer_id=None):
     strict=True,
 )
 def lookup_order(customer_id, order_id=None):
-    orders = [o for o in _ORDERS if o["customer_id"] == customer_id]
-    if order_id:
-        orders = [o for o in orders if o["order_id"] == order_id]
-    return {"orders": orders}
+    orders = db.list_orders(customer_id, order_id)
+    return {"orders": [o.to_dict() for o in orders]}
 
 
 @tool(
@@ -263,13 +212,16 @@ def lookup_order(customer_id, order_id=None):
     strict=True,  # money-critical: guarantee the input validates exactly
 )
 def process_refund(customer_id, order_id, amount):
+    # Convert the model's JSON number to Decimal via str so no float artifact
+    # leaks into the money comparison (Decimal(str(149.99)) == 149.99 exactly).
+    amount = Decimal(str(amount))
     # Gate: the order must exist and belong to the verified customer.
-    order = _find_order(customer_id, order_id)
+    order = db.find_order(customer_id, order_id)
     if order is None:
         return {"error": "No such order for this customer."}
     if amount <= 0:
         return {"error": "Refund amount must be positive."}
-    if amount > order["total"]:
+    if amount > order.total:
         return {"error": "Refund amount exceeds the order total."}
 
     # Note: the > REFUND_THRESHOLD guard lives in a pre-call hook
@@ -301,19 +253,19 @@ def process_refund(customer_id, order_id, amount):
     strict=True,  # money-critical: guarantee the input validates exactly
 )
 def refund_order(customer_id, order_id):
-    order = _find_order(customer_id, order_id)
+    order = db.find_order(customer_id, order_id)
     if order is None:
         return {"error": "No such order for this customer."}
     # Refund the whole order total; threshold guard lives in the pre-call hook.
     return {
         "refund_id": f"ref_{order_id}",
         "status": "approved",
-        "amount": order["total"],
+        "amount": order.total,
     }
 
 
 def _refund_exceeds_threshold(amount):
-    """Shared block decision for a refund amount over the threshold."""
+    """Shared block decision for a refund amount (Decimal) over the threshold."""
     if amount > REFUND_THRESHOLD:
         return {
             "status": "blocked",
@@ -328,16 +280,16 @@ def _refund_exceeds_threshold(amount):
 @hook("process_refund")
 def _block_large_refunds(tool_input):
     """Block partial refunds over the threshold before the tool runs."""
-    return _refund_exceeds_threshold(tool_input.get("amount", 0))
+    return _refund_exceeds_threshold(Decimal(str(tool_input.get("amount", 0))))
 
 
 @hook("refund_order")
 def _block_large_full_refunds(tool_input):
     """Block full refunds over the threshold by resolving the order total."""
-    order = _find_order(tool_input.get("customer_id"), tool_input.get("order_id"))
+    order = db.find_order(tool_input.get("customer_id"), tool_input.get("order_id"))
     if order is None:
         return None  # let the tool return the not-found error
-    return _refund_exceeds_threshold(order["total"])
+    return _refund_exceeds_threshold(order.total)
 
 
 @tool(
@@ -379,3 +331,77 @@ def _block_large_full_refunds(tool_input):
 def escalate_to_human(summary):
     customer_id = summary.get("customer_id", "unknown")
     return {"ticket_id": f"tkt_{customer_id}", "status": "open"}
+
+
+# RAG retrieval tools
+# ==================================
+def _format_hits(hits):
+    """Turn (Document, score) pairs into JSON-serializable result dicts."""
+    return [
+        {
+            "content": doc.content,
+            "source": doc.source,
+            "doc_id": doc.doc_id,
+            "score": round(score, 4),
+        }
+        for doc, score in hits
+    ]
+
+
+@tool(
+    name="search_knowledge",
+    description=(
+        "Search the company knowledge base (refund/shipping policies and FAQs) "
+        "for relevant text. Call this whenever the customer asks how a policy "
+        "works or any general 'how do I...' question, instead of answering from "
+        "memory. Returns the most relevant passages."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Natural-language question to search for",
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+def search_knowledge(query):
+    query_vec = _embedder.embed([query], input_type="query")[0]
+    hits = db.search_documents(query_vec, top_k=4, sources=["policy", "faq"])
+    return {"results": _format_hits(hits)}
+
+
+@tool(
+    name="search_past_tickets",
+    description=(
+        "Search a verified customer's past support tickets for similar prior "
+        "issues. Requires the verified customer_id; only that customer's "
+        "transcripts are searched. Use it to check 'have we seen this before'."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "customer_id": {
+                "type": "string",
+                "description": "Verified customer id (from get_customer)",
+            },
+            "query": {
+                "type": "string",
+                "description": "Natural-language description of the issue",
+            },
+        },
+        "required": ["customer_id", "query"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+def search_past_tickets(customer_id, query):
+    query_vec = _embedder.embed([query], input_type="query")[0]
+    hits = db.search_documents(
+        query_vec, top_k=4, sources=["transcript"], customer_id=customer_id
+    )
+    return {"results": _format_hits(hits)}
