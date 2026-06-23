@@ -98,8 +98,6 @@ class Order(Base, TimestampMixin):
     )
     items: Mapped[list] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String)
-    # Money as exact Decimal end-to-end. The JSON boundary (src/ai.py) encodes
-    # Decimal as a number, so no float ever touches the amount in logic.
     total: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     order_date: Mapped[str] = mapped_column(String)
     delivery_date: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -135,8 +133,6 @@ class Document(Base, TimestampMixin):
     chunk_index: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
-    # Promoted to a first-class indexed column (NULL = org-wide). Scoping filters
-    # MUST use this column, never JSON meta.
     customer_id: Mapped[str | None] = mapped_column(
         ForeignKey("customers.customer_id"), nullable=True, index=True
     )
@@ -144,10 +140,7 @@ class Document(Base, TimestampMixin):
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
 
     __table_args__ = (
-        # Idempotent upserts target (doc_id, chunk_index).
         UniqueConstraint("doc_id", "chunk_index", name="uq_documents_doc_chunk"),
-        # Composite B-tree for the scoping filter; the HNSW vector index is
-        # created in the Alembic migration (Postgres-only DDL).
         Index("ix_documents_source_customer", "source", "customer_id"),
     )
 
@@ -161,15 +154,10 @@ class Database:
 
     def __init__(self, url=None):
         self.url = url or os.getenv("DATABASE_URL", "sqlite:///support.db")
-        # pool_pre_ping validates a connection before use (avoids "server closed
-        # the connection" after a DB restart/idle timeout). The size knobs are
-        # QueuePool-only, so skip them for SQLite.
         engine_kwargs = {"future": True, "pool_pre_ping": True}
         if not self.url.startswith("sqlite"):
             engine_kwargs.update(pool_size=5, max_overflow=10, pool_recycle=1800)
         self.engine = create_engine(self.url, **engine_kwargs)
-        # expire_on_commit=False lets callers read column values after the
-        # session closes (we hand detached ORM rows back to the tools).
         self._session_factory = sessionmaker(
             bind=self.engine, future=True, expire_on_commit=False
         )
@@ -303,7 +291,6 @@ class Database:
 # Default instance used by the tools layer (reads DATABASE_URL).
 db = Database()
 
-
 # Seed data — the mock records that used to live in src/tools.py.
 # ==================================
 _SEED_CUSTOMERS = [
@@ -343,7 +330,6 @@ _SEED_ORDERS = [
         "delivery_date": None,
     },
 ]
-
 
 if __name__ == "__main__":
     db.seed()

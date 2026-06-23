@@ -348,31 +348,55 @@ def _format_hits(hits):
     ]
 
 
-@tool(
-    name="search_knowledge",
-    description=(
-        "Search the company knowledge base (refund/shipping policies and FAQs) "
-        "for relevant text. Call this whenever the customer asks how a policy "
-        "works or any general 'how do I...' question, instead of answering from "
-        "memory. Returns the most relevant passages."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Natural-language question to search for",
-            },
+def _semantic_search(query, sources):
+    """Embed the query and return the top knowledge chunks for the given sources."""
+    query_vec = _embedder.embed([query], input_type="query")[0]
+    hits = db.search_documents(query_vec, top_k=4, sources=sources)
+    return {"results": _format_hits(hits)}
+
+
+# A single text-query schema reused by the knowledge-search tools.
+_QUERY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "Natural-language question to search for",
         },
-        "required": ["query"],
-        "additionalProperties": False,
     },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
+
+@tool(
+    name="search_policies",
+    description=(
+        "Search company policy documents (refunds, shipping, returns) for "
+        "relevant text. Call this whenever the customer asks how a policy works "
+        "or what the rules are, instead of answering from memory. Returns the "
+        "most relevant policy passages."
+    ),
+    input_schema=_QUERY_SCHEMA,
     strict=True,
 )
-def search_knowledge(query):
-    query_vec = _embedder.embed([query], input_type="query")[0]
-    hits = db.search_documents(query_vec, top_k=4, sources=["policy", "faq"])
-    return {"results": _format_hits(hits)}
+def search_policies(query):
+    return _semantic_search(query, ["policy"])
+
+
+@tool(
+    name="search_faqs",
+    description=(
+        "Search the FAQ knowledge base for relevant text. Call this for general "
+        "'how do I...' questions (tracking an order, handling a damaged item, "
+        "etc.) instead of answering from memory. Returns the most relevant FAQ "
+        "passages."
+    ),
+    input_schema=_QUERY_SCHEMA,
+    strict=True,
+)
+def search_faqs(query):
+    return _semantic_search(query, ["faq"])
 
 
 @tool(

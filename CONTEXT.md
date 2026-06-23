@@ -26,6 +26,24 @@ The kind of knowledge a Document holds — one of `policy`, `faq`, `transcript`.
 **Transcript**:
 A past support-ticket conversation, scoped privately to one Customer.
 
+### Harness (multi-agent)
+
+**Orchestrator**:
+The hub agent. It never touches data directly — it delegates to Spokes and then asks the Synth agent for the final reply.
+
+**Spoke**:
+A specialist sub-agent the Orchestrator delegates to (Customer, Refund, Knowledge, History, Escalation), each with a focused toolset.
+_Avoid_: worker, child agent.
+
+**Synth agent**:
+A tool-less agent that drafts the final customer-facing reply from the findings, quoting money/policy facts verbatim.
+
+**Customer gate**:
+The rule that money/history/escalation Spokes run only for a Customer the Customer Spoke has verified this conversation.
+
+**Findings record**:
+A Spoke's structured output `{agent, request, status, data, conclusion, tools_used}` collected for the Synth agent.
+
 ## Relationships
 
 - A **Customer** has many **Orders** and many **Transcripts**

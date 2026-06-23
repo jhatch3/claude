@@ -124,6 +124,49 @@ class Conversation:
 
         return message
 
+    def run_task(self, task, dispatch=run_tool, max_iters=6):
+        """Run a single task to completion (non-interactive).
+
+        Used by the multi-agent harness for sub-agents. Returns
+        (final_text, trace, capped) where `trace` is a list of
+        {tool, input, result} for each tool the agent executed, and `capped`
+        is True if it hit max_iters while still wanting to call tools.
+        `dispatch` lets the orchestrator route to delegation tools instead of
+        the global run_tool. max_iters=None disables the cap.
+        """
+        self.add_user_message(task)
+        trace = []
+        message = client.messages.create(**self._build_params())
+        iters = 0
+        while message.stop_reason == "tool_use" and (
+            max_iters is None or iters < max_iters
+        ):
+            tool_use = next(b for b in message.content if b.type == "tool_use")
+            result = dispatch(tool_use.name, dict(tool_use.input))
+            trace.append(
+                {"tool": tool_use.name, "input": dict(tool_use.input), "result": result}
+            )
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": json.dumps(result, default=_json_default),
+            }
+            if isinstance(result, dict) and "error" in result:
+                tool_result["is_error"] = True
+            self.add_assistant_message(message)
+            self.add_user_message([tool_result])
+            message = client.messages.create(**self._build_params())
+            iters += 1
+
+        self.add_assistant_message(message)
+        final_text = next((b.text for b in message.content if b.type == "text"), "")
+        capped = (
+            max_iters is not None
+            and iters >= max_iters
+            and message.stop_reason == "tool_use"
+        )
+        return final_text, trace, capped
+
     def chat(self):
         while True:
             user_input = input("User: ")
