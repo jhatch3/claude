@@ -13,7 +13,7 @@ import hashlib
 
 from src.db import db
 from src.embeddings import get_embedder
-from src.prompt.knowledge import FAQS, POLICY_DOCS, TRANSCRIPTS
+from src.prompts.corpus import FAQS, POLICY_DOCS, TRANSCRIPTS
 
 
 def chunk_text(text, max_chars=600, overlap=100):

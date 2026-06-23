@@ -1,33 +1,13 @@
 """
-Main file for the AI module
-
-This module contains the core AI logic for the application.
-
+The Conversation class — single-agent message history, the tool-use loop, the
+interactive REPL, and the programmatic run_task() used by the harness.
 """
 import json
-from decimal import Decimal
 
 import anthropic
-from dotenv import load_dotenv
 
-from src.prompt.system import SYSTEM_MESSAGE
+from src.llm.client import _json_default, client
 from src.tools import get_tool_definitions, run_tool
-
-load_dotenv()
-
-
-def _json_default(obj):
-    """Let json.dumps emit Decimal money as a JSON number."""
-    if isinstance(obj, Decimal):
-        return float(obj)
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
-# Globals
-# ==================================
-# 60s timeout (vs the 10-min default) so a stuck network surfaces quickly
-# instead of looking like a freeze.
-client = anthropic.Anthropic(timeout=60)
-# ==================================
 
 
 class Conversation:
@@ -53,8 +33,7 @@ class Conversation:
         self.tools = tools if tools is not None else get_tool_definitions()
 
     def add_message(self, role, content):
-        """Append a message after validating role and content.
-        """
+        """Append a message after validating role and content."""
         if role not in ("user", "assistant"):
             raise ValueError(f"role must be 'user' or 'assistant', got {role!r}")
         if content is None:
@@ -192,13 +171,3 @@ class Conversation:
 
             text = next((b.text for b in message.content if b.type == "text"), "")
             print(f"Assistant: {text}")
-
-
-def main():
-    print("Starting chat...")
-
-    Conversation(system_message=SYSTEM_MESSAGE).chat()
-
-
-if __name__ == "__main__":
-    main()

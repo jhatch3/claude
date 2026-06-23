@@ -1,7 +1,7 @@
 """
 System prompt for the support agent, assembled from its parts.
 
-SYSTEM_MESSAGE is what src/ai.py passes into Conversation(system_message=...).
+SYSTEM_MESSAGE is what src/llm passes into Conversation(system_message=...).
 """
 
 TASK_INSTRUCTIONS = "You are a helpful assistant that can answer questions and provide information on a wide range of topics. Please respond to the user's queries in a clear and concise manner. if i ask a question only respond with anwser do not add any other conext or comments"
