@@ -4,8 +4,13 @@ Main file for the AI module
 This module contains the core AI logic for the application.
 
 """
+import json
+
 import anthropic
 from dotenv import load_dotenv
+
+from src.prompt.sys import system_message
+from src.tools import get_tool_definitions, run_tool
 
 load_dotenv()
 
@@ -28,12 +33,14 @@ class Conversation:
         temperature=0.7,
         max_tokens=1024,
         system_message=None,
+        tools=None,
     ):
         self.messages = []
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.system_message = system_message
+        self.tools = tools if tools is not None else get_tool_definitions()
 
     def add_message(self, role, content):
         """Append a message after validating role and content.
@@ -46,10 +53,11 @@ class Conversation:
         if content is None:
             raise ValueError("content must not be None")
 
-        if isinstance(content, str):
+        if isinstance(content, (str, list)):
+            # A string or an explicit list of content blocks goes in as-is.
             self.messages.append({"role": role, "content": content})
         else:
-            # Not a string, so it's an API Message — store its content blocks.
+            # Otherwise it's an API Message — store its content blocks.
             self.messages.append({"role": role, "content": content.content})
 
     def add_user_message(self, content):
@@ -66,6 +74,10 @@ class Conversation:
             "temperature": self.temperature,
         }
 
+        if self.tools:
+            params["tools"] = self.tools
+            params["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+
         if self.system_message:
             # System rendered as a content block so we can attach cache_control.
             params["system"] = [
@@ -78,6 +90,33 @@ class Conversation:
 
         return params
 
+    def _run_tools(self, message):
+        """Resolve tool-use turns until the model returns a final answer.
+
+        disable_parallel_tool_use guarantees at most one tool_use block per turn.
+        Returns the final (non-tool-use) message.
+        """
+        while message.stop_reason == "tool_use":
+            tool_use = next(b for b in message.content if b.type == "tool_use")
+            result = run_tool(tool_use.name, tool_use.input)
+
+            # An "error" key marks a genuine failure (unknown tool, exception,
+            # or validation) — flag it so Claude can recover. Business outcomes
+            # like a blocked refund carry no "error" key and stay normal.
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": json.dumps(result),
+            }
+            if isinstance(result, dict) and "error" in result:
+                tool_result["is_error"] = True
+
+            self.add_assistant_message(message)
+            self.add_user_message([tool_result])
+            message = client.messages.create(**self._build_params())
+
+        return message
+
     def chat(self):
         while True:
             user_input = input("User: ")
@@ -86,13 +125,19 @@ class Conversation:
 
             self.add_user_message(user_input)
             message = client.messages.create(**self._build_params())
+            message = self._run_tools(message)
             self.add_assistant_message(message)
-            print(f"Assistant: {message.content[0].text}")
+
+            final_text = next(
+                (b.text for b in message.content if b.type == "text"), ""
+            )
+            print(f"Assistant: {final_text}")
 
 
 def main():
     print("Starting chat...")
-    Conversation().chat()
+
+    Conversation(system_message=system_message).chat()
 
 
 if __name__ == "__main__":

@@ -6,4 +6,4 @@ format_instructions = "Only use raw text, do not use any formatting, markdown, o
 
 example_get_weather = "User: What is the weather like in New York City today?\nAssistant: The weather in New York City today is sunny with a high of 75°F (24°C) and a low of 60°F (16°C)."
 
-system_prompt = f"</Task> {task_instructions} </Task> <Format> {format_instructions} </Format> <Example> {example_get_weather} </Example>"
+system_message = f"</Task> {task_instructions} </Task> <Format> {format_instructions} </Format> <Example> {example_get_weather} </Example>"
