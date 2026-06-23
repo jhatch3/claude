@@ -5,9 +5,11 @@ This module contains the core AI logic for the application.
 
 """
 import json
+from typing import Literal
 
 import anthropic
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 from src.prompt.sys import system_message
 from src.tools import get_tool_definitions, run_tool
@@ -16,8 +18,31 @@ load_dotenv()
 
 # Globals
 # ==================================
-client = anthropic.Anthropic()
+# 60s timeout (vs the 10-min default) so a stuck network surfaces quickly
+# instead of looking like a freeze.
+client = anthropic.Anthropic(timeout=60)
 # ==================================
+
+
+class SupportReply(BaseModel):
+    """Structured shape for the assistant's final answer each turn.
+
+    Constrained via output_config.format so every turn yields a machine-readable
+    result the app can route on, not just free prose.
+    """
+
+    reply: str = Field(description="The plain-text message to show the user.")
+    resolution: Literal[
+        "resolved", "refunded", "info_provided", "escalated", "needs_more_info"
+    ] = Field(description="How this turn was resolved.")
+    escalated: bool = Field(description="True if the case was handed to a human.")
+
+
+def _strict_schema(model_cls):
+    """Build a strict json_schema (additionalProperties: false) from a model."""
+    schema = model_cls.model_json_schema()
+    schema["additionalProperties"] = False
+    return schema
 
 
 class Conversation:
@@ -34,6 +59,7 @@ class Conversation:
         max_tokens=1024,
         system_message=None,
         tools=None,
+        response_schema=SupportReply,
     ):
         self.messages = []
         self.model = model
@@ -41,6 +67,8 @@ class Conversation:
         self.max_tokens = max_tokens
         self.system_message = system_message
         self.tools = tools if tools is not None else get_tool_definitions()
+        # Pydantic model the final reply is constrained to; None = free text.
+        self.response_schema = response_schema
 
     def add_message(self, role, content):
         """Append a message after validating role and content.
@@ -77,6 +105,16 @@ class Conversation:
         if self.tools:
             params["tools"] = self.tools
             params["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+
+        if self.response_schema is not None:
+            # Constrains the final text turn to the schema; tool turns are
+            # unaffected (the model still emits tool_use blocks mid-loop).
+            params["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": _strict_schema(self.response_schema),
+                }
+            }
 
         if self.system_message:
             # System rendered as a content block so we can attach cache_control.
@@ -122,16 +160,36 @@ class Conversation:
             user_input = input("User: ")
             if user_input.strip().lower() in {"exit", "quit"}:
                 break
+            if not user_input.strip():
+                continue  # skip empty input — the API rejects empty messages
 
             self.add_user_message(user_input)
-            message = client.messages.create(**self._build_params())
-            message = self._run_tools(message)
+            print("...", end="", flush=True)  # show we're waiting on the API
+            try:
+                message = client.messages.create(**self._build_params())
+                message = self._run_tools(message)
+            except anthropic.APITimeoutError:
+                print("\r[timed out reaching the API — check your connection]")
+                self.messages.pop()  # drop the unanswered user turn
+                continue
+            except anthropic.APIError as exc:
+                print(f"\r[API error: {exc}]")
+                self.messages.pop()
+                continue
+            print("\r", end="")  # clear the "..." indicator
+
             self.add_assistant_message(message)
 
-            final_text = next(
-                (b.text for b in message.content if b.type == "text"), ""
-            )
-            print(f"Assistant: {final_text}")
+            # output_config.format guarantees the final turn's first block is
+            # text containing JSON valid against the schema.
+            text = next((b.text for b in message.content if b.type == "text"), "")
+            if self.response_schema is None:
+                print(f"Assistant: {text}")
+                continue
+
+            reply = self.response_schema.model_validate_json(text)
+            print(f"Assistant: {reply.reply}")
+            tag = f"{reply.resolution}{' · escalated' if reply.escalated else ''}"
 
 
 def main():

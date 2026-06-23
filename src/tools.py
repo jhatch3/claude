@@ -87,6 +87,7 @@ def run_tool(tool_name, tool_input):
         "required": ["city"],
         "additionalProperties": False,
     },
+    strict=True,
 )
 def get_weather(city):
     # Stub implementation — replace with a real lookup.
@@ -138,6 +139,18 @@ _ORDERS = [
 REFUND_THRESHOLD = 500.0
 
 
+def _find_order(customer_id, order_id):
+    """Return the order if it exists and belongs to the customer, else None."""
+    return next(
+        (
+            o
+            for o in _ORDERS
+            if o["order_id"] == order_id and o["customer_id"] == customer_id
+        ),
+        None,
+    )
+
+
 @tool(
     name="get_customer",
     description=(
@@ -148,13 +161,26 @@ REFUND_THRESHOLD = 500.0
     ),
     input_schema={
         "type": "object",
+        # Each identifier is optional, so under strict it's nullable + required:
+        # the model must send all three keys but may pass null for unknowns.
         "properties": {
-            "email": {"type": "string", "description": "Customer email address"},
-            "phone": {"type": "string", "description": "Customer phone number"},
-            "customer_id": {"type": "string", "description": "Known customer id"},
+            "email": {
+                "type": ["string", "null"],
+                "description": "Customer email address, or null if unknown",
+            },
+            "phone": {
+                "type": ["string", "null"],
+                "description": "Customer phone number, or null if unknown",
+            },
+            "customer_id": {
+                "type": ["string", "null"],
+                "description": "Known customer id, or null if unknown",
+            },
         },
+        "required": ["email", "phone", "customer_id"],
         "additionalProperties": False,
     },
+    strict=True,
 )
 def get_customer(email=None, phone=None, customer_id=None):
     if not any([email, phone, customer_id]):
@@ -195,13 +221,14 @@ def get_customer(email=None, phone=None, customer_id=None):
                 "description": "Verified customer id (from get_customer)",
             },
             "order_id": {
-                "type": "string",
-                "description": "Optional specific order id to fetch",
+                "type": ["string", "null"],
+                "description": "Specific order id to fetch, or null for all orders",
             },
         },
-        "required": ["customer_id"],
+        "required": ["customer_id", "order_id"],
         "additionalProperties": False,
     },
+    strict=True,
 )
 def lookup_order(customer_id, order_id=None):
     orders = [o for o in _ORDERS if o["customer_id"] == customer_id]
@@ -237,14 +264,7 @@ def lookup_order(customer_id, order_id=None):
 )
 def process_refund(customer_id, order_id, amount):
     # Gate: the order must exist and belong to the verified customer.
-    order = next(
-        (
-            o
-            for o in _ORDERS
-            if o["order_id"] == order_id and o["customer_id"] == customer_id
-        ),
-        None,
-    )
+    order = _find_order(customer_id, order_id)
     if order is None:
         return {"error": "No such order for this customer."}
     if amount <= 0:
@@ -254,13 +274,46 @@ def process_refund(customer_id, order_id, amount):
 
     # Note: the > REFUND_THRESHOLD guard lives in a pre-call hook
     # (_block_large_refunds), so by the time we get here the amount is approved.
-    return {"refund_id": f"ref_{order_id}", "status": "approved"}
+    return {"refund_id": f"ref_{order_id}", "status": "approved", "amount": amount}
 
 
-@hook("process_refund")
-def _block_large_refunds(tool_input):
-    """Block refunds over the threshold before the tool runs → escalate."""
-    amount = tool_input.get("amount", 0)
+@tool(
+    name="refund_order",
+    description=(
+        "Refund an order in full — the default refund. Use this when the "
+        "customer wants their whole order refunded; only use process_refund "
+        "when refunding a partial amount. Requires a verified customer_id and "
+        "the order_id. Full refunds over the threshold are blocked and must be "
+        "escalated to a human instead."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "customer_id": {
+                "type": "string",
+                "description": "Verified customer id (from get_customer)",
+            },
+            "order_id": {"type": "string", "description": "Order to refund in full"},
+        },
+        "required": ["customer_id", "order_id"],
+        "additionalProperties": False,
+    },
+    strict=True,  # money-critical: guarantee the input validates exactly
+)
+def refund_order(customer_id, order_id):
+    order = _find_order(customer_id, order_id)
+    if order is None:
+        return {"error": "No such order for this customer."}
+    # Refund the whole order total; threshold guard lives in the pre-call hook.
+    return {
+        "refund_id": f"ref_{order_id}",
+        "status": "approved",
+        "amount": order["total"],
+    }
+
+
+def _refund_exceeds_threshold(amount):
+    """Shared block decision for a refund amount over the threshold."""
     if amount > REFUND_THRESHOLD:
         return {
             "status": "blocked",
@@ -270,6 +323,21 @@ def _block_large_refunds(tool_input):
             ),
         }
     return None
+
+
+@hook("process_refund")
+def _block_large_refunds(tool_input):
+    """Block partial refunds over the threshold before the tool runs."""
+    return _refund_exceeds_threshold(tool_input.get("amount", 0))
+
+
+@hook("refund_order")
+def _block_large_full_refunds(tool_input):
+    """Block full refunds over the threshold by resolving the order total."""
+    order = _find_order(tool_input.get("customer_id"), tool_input.get("order_id"))
+    if order is None:
+        return None  # let the tool return the not-found error
+    return _refund_exceeds_threshold(order["total"])
 
 
 @tool(
@@ -288,12 +356,16 @@ def _block_large_refunds(tool_input):
                 "properties": {
                     "customer_id": {"type": "string"},
                     "root_cause": {"type": "string"},
-                    "amount": {"type": "number"},
+                    "amount": {
+                        "type": ["number", "null"],
+                        "description": "Dollar amount in question, or null if N/A",
+                    },
                     "recommended_action": {"type": "string"},
                 },
                 "required": [
                     "customer_id",
                     "root_cause",
+                    "amount",
                     "recommended_action",
                 ],
                 "additionalProperties": False,
@@ -302,6 +374,7 @@ def _block_large_refunds(tool_input):
         "required": ["summary"],
         "additionalProperties": False,
     },
+    strict=True,
 )
 def escalate_to_human(summary):
     customer_id = summary.get("customer_id", "unknown")
